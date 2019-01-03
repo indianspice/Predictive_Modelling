@@ -1,0 +1,2534 @@
+---
+title: "DATA 624 - Project 2"
+author:
+- Marco Siqueira Campos
+- Sharon Morris
+- Jeff Nieman
+- Derek Nokes
+- Jose Zuniga
+date: "May 15, 2018"
+output: word_document
+---
+
+```{r,echo=FALSE,warning=FALSE,error=FALSE,message=FALSE}
+# set download flag
+downloadFlag<-FALSE
+# set cashe flag
+cacheFlag<-TRUE
+# set evaluate model flag (if FALSE, load the model)
+modelEvaluate<-FALSE
+# set show code flag
+showCodeFlag<-FALSE
+# set error flag
+errorFlag<-FALSE
+# set warning flag
+warningFlag<-FALSE
+# set message flag
+messageFlag<-FALSE
+
+
+```
+
+
+
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# import required packages
+library(xlsx)
+library(tidyverse)
+library(caret)
+library(forecast)
+library(pander)
+library(mice)
+library(VIM)
+library(parallel)
+library(doParallel)
+library(pdp)
+library(psych)
+
+
+```
+
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# define random seed
+randomSeed<-1234567
+# find number of codes
+nCores<-detectCores()
+
+
+```
+
+
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# define input/output variables
+baseURL <- "https://raw.githubusercontent.com/jzuniga123"
+file1URL<-"/SPS/master/DATA%20624/StudentData.xlsx"
+file2URL<-"/SPS/master/DATA%20624/StudentEvaluation-%20TO%20PREDICT.xlsx"
+outputDirectory <- "D:/Dropbox/github/DATA_624/"
+inputFileName<-"StudentData.xlsx"
+outputFileName<-"StudentEvaluation-PREDICT.xlsx"
+# define full input file name
+fullInputFileName<-paste0(outputDirectory,
+  inputFileName)
+# define full output file name
+fullOutputFileName<-paste0(outputDirectory,
+  outputFileName)
+
+
+```
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+if (modelEvaluate==FALSE){
+  load(file=paste0(outputDirectory,"model_rlm.RData"))
+  load(file=paste0(outputDirectory,"model_pcr.RData"))
+  load(file=paste0(outputDirectory,"model_pls.RData"))
+  load(file=paste0(outputDirectory,"model_enet.RData"))
+  load(file=paste0(outputDirectory,"model_avnnet.RData"))
+  load(file=paste0(outputDirectory,"model_mars.RData"))
+  load(file=paste0(outputDirectory,"model_bagged_mars.RData"))
+  load(file=paste0(outputDirectory,"model_bagged_gCV_mars.RData"))
+  load(file=paste0(outputDirectory,"model_svm.RData"))
+  load(file=paste0(outputDirectory,"model_svm2.RData"))
+  load(file=paste0(outputDirectory,"model_knn.RData"))
+  load(file=paste0(outputDirectory,"model_cart.RData"))
+  load(file=paste0(outputDirectory,"model_rf.RData"))
+  load(file=paste0(outputDirectory,"model_gbm.RData"))
+  load(file=paste0(outputDirectory,"model_cubist.RData"))
+  load(file=paste0(outputDirectory,"model_cubist_full.RData"))
+}
+
+```
+
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+
+if (downloadFlag){
+  # download input file (xlsx)
+  download.file(paste0(baseURL, file1URL),fullInputFileName, 
+    mode="wb")
+  # download output file (xlsx)
+  download.file(paste0(baseURL, file2URL),fullOutputFileName, 
+    mode="wb")  
+}
+
+
+```
+
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# read input file (xlsx)
+inSampleData <- xlsx::read.xlsx(fullInputFileName, 
+  sheetIndex=1, header=T)
+# read output file (xlsx)
+outOfSampleData <- xlsx::read.xlsx(fullOutputFileName, 
+  sheetIndex=1, header=T)
+# remove input file name (xlsx)
+#invisible(file.remove(fullInputFileName))
+# remove output file (xlsx)
+#invisible(file.remove(fullOutputFileName))
+
+
+```
+
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# find number of observations of each predictor
+nObservations<-dim(inSampleData)[1]
+# find number of predictors
+nPredictors<-dim(inSampleData %>% select(-PH))[2]
+
+
+```
+
+
+
+## Data Preparation
+
+In additional to the response variable, the original data set contains `r nPredictors` predictors, each with `r nObservations` observations.
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# drop NAs from the response variable
+inSampleDataRmNA <- inSampleData %>% drop_na(PH)
+# configure replacement of categorical variables with dummy variables
+dummyVariables <- dummyVars(" ~ .", data = inSampleDataRmNA,fullRank=T)
+# replace categorical variables with dummy variables
+inSampleDataRmNADv <- data.frame(predict(dummyVariables, 
+  newdata = inSampleDataRmNA))
+# extract response
+responseDv <- inSampleDataRmNADv %>% select(PH)
+# extract predictors
+predictorsDv <- inSampleDataRmNADv %>% select(-PH)
+# extract response
+response <- inSampleDataRmNA %>% select(PH)
+# extract predictors
+predictors <- inSampleDataRmNA %>% select(-PH)
+
+
+```
+
+
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# find number of observations of each predictor
+nObservationsRmNADv<-dim(predictorsDv)[1]
+# find number of predictors
+nPredictorsRmNADv<-dim(predictorsDv)[2]
+
+
+```
+
+
+
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# set training percent
+trainPercent<-0.75
+
+
+```
+
+
+
+
+
+We split the data into training (`r trainPercent*100`%) and test sets (`r (1-trainPercent)*100`%), then pre-processed the data.
+
+After removing `r (nObservations-nObservationsRmNADv)` rows corresponding to missing values of the response variable, `r nObservationsRmNADv` observations for each of the `r nPredictors` predictors remained for the development of our predictive model. Encoding of the `Brand.Code` variable as a set of dummy variables replaced the original `Brand.Code` variable with `r (nPredictorsRmNADv-nPredictors)+1` dummy variables, increasing the number of predictors to `r nPredictorsRmNADv`. Although some models require this dummy variable encoding, other models are more performant using categorical predictors. We, therefore, used categorical predictors for some models and the equivalent dummy variable predictors for other models.
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# define random seed
+set.seed(randomSeed)
+# create training set index
+trainIndex<-createDataPartition(response$PH,p=trainPercent,list=FALSE)
+# extract training set (used for visualization)
+inSampleDataRmNATrain<-inSampleDataRmNA[trainIndex,]
+# extract test set (used for visualization)
+inSampleDataRmNATest<-inSampleDataRmNA[-trainIndex,]
+# extract training set (used for modelling>)
+inSampleDataRmNADvTrain<-inSampleDataRmNADv[trainIndex,]
+# extract test set (used for modelling?)
+inSampleDataRmNADvTest<-inSampleDataRmNADv[-trainIndex,]
+
+# extract predictor training set
+predictorsDvTrain<-predictorsDv[trainIndex,]
+# extract predictor test set
+predictorsDvTest<-predictorsDv[-trainIndex,]
+# extract response test set
+responseDvTrain<-responseDv[trainIndex,]
+# extract response training set
+responseDvTest<-responseDv[-trainIndex,]
+
+# extract predictor training set
+predictorsTrain<-predictors[trainIndex,]
+# extract predictor test set
+predictorsTest<-predictors[-trainIndex,]
+# extract response test set
+responseTrain<-response[trainIndex,]
+# extract response training set
+responseTest<-response[-trainIndex,]
+
+
+```
+
+
+## Data Exploration
+
+So as not to inadvertently exploit information from the testing set in our model buiding, we explored only the training set.
+
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# find number missing predictors
+nMissingPredictorsTrain<-sum(is.na(predictorsTrain))
+# find number of observations of each predictor
+nObservationsTrain<-dim(predictorsTrain)[1]
+# find number of predictors
+nPredictorsTrain<-dim(predictorsTrain)[2]
+# find total number of values
+totalNTrain<-nObservationsTrain*nPredictorsTrain
+# frequency of missing data
+missingFrequencyTrain<-round((nMissingPredictorsTrain/totalNTrain)*100,2)
+
+
+```
+
+
+
+We observed a missing value frequency of only `r missingFrequencyTrain`% in the training set. The distribution of missing values across the predictors predictors are shown in the table and corresponding plots immediately below.
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# find missing counts and frequency (%)
+missingFrequencyOfTotalByPredictorTable <- inSampleDataRmNA %>% 
+  # remove PH
+  select(-PH) %>% 
+  # extract values by predictor
+  gather(predictorLabel,value) %>%
+  # group by predictor
+  group_by(predictorLabel) %>% 
+  # count missing values by predictor
+  summarize(missingCount=sum(is.na(value))) %>% 
+  # convert count to frequency
+  mutate(missingFrequency=(missingCount/totalNTrain)*100) %>% 
+  # sort by missing frequency
+  arrange(desc(missingFrequency))
+
+
+```
+
+**Missing Values By Predictor (Proportion Of Total Frequency)**
+
+`r pander(missingFrequencyOfTotalByPredictorTable)`
+
+```{r,results=FALSE,fig.height = 6, fig.width = 8,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# define missing value color
+notMissingColor<-"navyblue"
+# define not missing value color
+missingColor<-"red"
+# create missing value visualization
+aggr(inSampleDataRmNA %>% select(-PH), sortVars = TRUE, bar = FALSE, 
+  prop = FALSE, gap = 1, cex.axis = 0.7,col = c(notMissingColor, 
+  missingColor), ylab = c("Count of Missing Values", "Observation Index"))
+
+
+```
+
+
+
+```{r,fig.height = 11, fig.width = 8,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# set number of bins
+nBins<-20
+# plot distribution before i
+inSampleDataRmNATrain %>% 
+  select(-Brand.Code) %>% 
+  gather(Variable, Values) %>% 
+  ggplot(aes(x = Values)) +
+  geom_histogram(alpha = 0.25, col = "black", bins = nBins) +
+  facet_wrap(~ Variable, scales = "free", nrow = 8)
+
+
+```
+
+
+```{r,fig.height = 11, fig.width = 8,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+inSampleDataRmNATrain %>% 
+  gather(-PH, -Brand.Code, key="Var", value="Value") %>% 
+  ggplot(aes(x=Value, y=PH, color=Brand.Code)) +
+  geom_point(alpha=0.6) +
+  facet_wrap(~ Var, scales = "free", nrow=8)
+
+
+```
+
+We can see from the above plots depicting the relationship between our predictors and the response, there there are few, if any, relationships that are apparent based simply on visualizing the data.
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+data_tbl<-psych::describe(inSampleData[,-1],IQR=T)[,c(1:5,8:10,11,12)]
+knitr::kable(round(data_tbl,2), caption = "Selected Summary Statistics")
+rm(data_tbl)
+```
+
+Many of our models are sensitive to missing values. We used predictive mean matching (PMM) to impute missing values, filtered out near-zero variance predictors, then applied Box-Cox, centering, and scaling transformations.
+
+```{r,results=FALSE,cache=cacheFlag,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# impute missing values (using Predictive Mean Matching)
+imputeMethodPMM<-mice(predictorsTrain,m=50,meth='pmm',seed=randomSeed,printFlag = F)
+predictorsTrain<-complete(imputeMethodPMM)
+# impute missing values (using Predictive Mean Matching)
+imputeMethodPMM<-mice(predictorsTest,m=50,meth='pmm',seed=randomSeed,printFlag = F)
+predictorsTest<-complete(imputeMethodPMM)
+# define preprocess methods
+preprocessMethods<-c('center','scale','BoxCox','nzv')
+# set up preprocessor using only training set
+predictorsPreprocessorTrain<-preProcess(predictorsTrain,
+  method=preprocessMethods)
+# apply preprocessing to training and test set
+# transform predictors (training set)
+predictorsTrainTransformed<-predict(predictorsPreprocessorTrain,
+  predictorsTrain)
+# transform predictors (test set)
+predictorsTestTransformed<-predict(predictorsPreprocessorTrain,
+  predictorsTest)
+# add dummy variables
+# configure replacement of categorical variables with dummy variables
+dummyVariables <- dummyVars(" ~ .", data = predictorsTrainTransformed,fullRank=T)
+# replace categorical variables with dummy variables
+predictorsDvTrainTransformed <- data.frame(predict(dummyVariables, 
+  newdata = predictorsTrainTransformed))
+
+# configure replacement of categorical variables with dummy variables
+dummyVariables <- dummyVars(" ~ .", data = predictorsTestTransformed,fullRank=T)
+# replace categorical variables with dummy variables
+predictorsDvTestTransformed <- data.frame(predict(dummyVariables, 
+  newdata = predictorsTestTransformed))
+
+
+```
+
+We used a process that builds the proprecessing using only the training data, then applied that process to the test data.
+
+After our preprocessing, our data contained no missing values (depicted in the plot immediately below).
+
+```{r,results=FALSE,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# define missing value color
+notMissingColor<-"navyblue"
+# define not missing value color
+missingColor<-"red"
+# create missing value visualization
+aggr(predictorsTrainTransformed, sortVars = TRUE, bar = FALSE, 
+  prop = FALSE, gap = 1, cex.axis = 0.7,col = c(notMissingColor, 
+  missingColor), ylab = c("Count of Missing Values", 
+  "Observation Index"))
+
+
+```
+
+
+
+```{r,fig.height = 11, fig.width = 8,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# # set number of bins
+# nBins<-20
+# # plot distribution before i
+# predictorsTrainTransformed %>% 
+#   select(-Brand.Code) %>% 
+#   gather(Variable, Values) %>% 
+#   ggplot(aes(x = Values)) +
+#   geom_histogram(alpha = 0.25, col = "black", bins = nBins) +
+#   facet_wrap(~ Variable, scales = "free", nrow = 8)
+
+```
+
+
+
+
+
+
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# predictorsTrainTransformed
+
+```
+
+
+## Model Tuning
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# set number of repeats
+nRepeats<-10
+# set number of folds for cross-validation
+nFolds<-10 # original used 10
+
+
+```
+
+For each model tested, we used a repeated `r nFolds`-fold cross-validation with `r nRepeats` repeats. The steps for this process are as follows: 
+
+1. Training data was split into 10 distinct blocks of roughly equal size using random sampling with replacement
+
+2. 10 models were trained on the data, each with one of the distinct blocks held-out
+
+3. Each of the 10 models was used to predict its corresponding hold-out block
+
+4. The process was repeated 10 times
+
+5. Performance was computed based on the hold-out block data from all repeats
+
+This process was intended to incorporate sampling variation into to parameter tuning process and thereby reduce the chances of overfitting.
+
+As this process is computationally intensive - taking perhaps a full day on a 8-core workstation with 64 gigs of RAM - .RData files of each of the trained models have been posted to a dropbox link indicated in the Appendix. All of the code to fully replicate our study is included in the Appendix.
+
+In the following sub-sections, we show the tuning profile from the repeated cross-validation for each of the 15 models tested. The random seed was set to the same value for each model training process to ensure that model performance could be compared. Performance for all models is summarized in the model selection section following the sub-sections illustrating each of the model tuning profiles.
+
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# set random seed
+set.seed(randomSeed)
+
+# create cluster (leave 1 core for OS)
+cluster <- makeCluster(nCores-1)
+# register cluster
+registerDoParallel(cluster)
+# set parallel flag
+parallelFlag<-TRUE
+
+# set up 10-fold cross validation
+modelControl <- trainControl(method='repeatedcv',
+  repeats=nRepeats,number=nFolds,allowParallel = parallelFlag)
+
+
+```
+
+
+### Linear Regression Models
+
+A linear regression model attempts to create a fit for the pH using a linear equation with the various predictors.  These methods included Robust Linear Regression (RLM), Principle Component Regression (PCR), Partial Least Squares Regression (PLS) and ElasticNet (ENET).
+
+#### Robust Linear Model (RLM)
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# define model type
+modelType <- "rlm"
+
+```
+
+```{r,cache=cacheFlag,eval=modelEvaluate,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# set random seed
+set.seed(randomSeed)
+# start timer
+startTime <- Sys.time()
+# train model
+model_rlm <- train(predictorsDvTrainTransformed, responseTrain,
+  method = modelType, trControl = modelControl)
+# stop timer
+endTime <- Sys.time()
+# determine run time
+runTime_rlm <- endTime - startTime
+# save model
+save(model_rlm,runTime_rlm,file = paste0(outputDirectory,
+  "model_rlm.RData"))
+
+```
+
+
+
+
+The model was tuned over the following parameters:
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# tuning parameters
+modelLookup(modelType)
+
+
+```
+
+The tuning profile is depicted immediately below.
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# define title name
+titleName <- "Root Mean Square Error Model Parameter"
+# plot
+rlm_G1<-model_rlm$results %>% 
+  ggplot(aes(x = psi, y = RMSE, col = factor(psi))) +
+  geom_line() + geom_point(size = 1) +
+  labs(title = titleName, col = "psi") + 
+  theme(legend.position = "top")
+
+
+```
+
+
+```{r,fig.height = 3, fig.width = 6,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+#rlm_G1
+```
+
+
+```{r,fig.height = 3, fig.width = 6,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+plot(model_rlm, main=model_rlm$modelInfo$label)
+
+
+```
+
+
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# determine variable importance
+variableImportance_rlm<-varImp(model_rlm)
+
+
+```
+
+
+
+```{r,fig.height = 8, fig.width = 6,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# define title name
+TitleName<-'Robust Linear Model (RLM)'
+# plot predictor importance
+rlm_G2<-ggplot(variableImportance_rlm) + 
+  # add title and subtitle
+  labs(title='Variable Importance Ranking',subtitle=TitleName)
+
+
+```
+
+
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# apply model to training set set
+model_rlm_train_p  <- predict(model_rlm, predictorsDvTrainTransformed)
+# create data frame
+df <- data.frame(obs = responseTrain, pred = model_rlm_train_p)
+# summary performance (out-of-sample)
+modelPerformanceTrain_rlm<-defaultSummary(df)
+
+# apply model to test set
+model_rlm_p  <- predict(model_rlm, predictorsDvTestTransformed)
+# create data frame
+df <- data.frame(obs = responseTest, pred = model_rlm_p)
+# summary performance (out-of-sample)
+modelPerformance_rlm<-defaultSummary(df)
+
+# combine in- and out- of-sample model performance
+performanceTable_rlm<-cbind(modelPerformanceTrain_rlm,
+  modelPerformance_rlm)
+# label
+colnames(performanceTable_rlm)<-c("Train","Test")
+
+```
+
+#### Principal Component Regression (PCR)
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# define model type
+modelType <- "pcr"
+
+```
+
+
+```{r,cache=cacheFlag,eval=modelEvaluate,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# set random seed
+set.seed(randomSeed)
+# start timer
+startTime <- Sys.time()
+# train model
+model_pcr <- train(predictorsTrainTransformed, responseTrain,
+  method = modelType, trControl = modelControl, tuneLength = 25)
+# stop timer
+endTime <- Sys.time()
+# determine run time
+runTime_pcr <- endTime - startTime
+# save model
+save(model_pcr,runTime_pcr,file = paste0(outputDirectory,
+  "model_pcr.RData"))
+
+```
+
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+#plot(model_pcr, main=model_pcr$modelInfo$label)
+
+```
+
+
+The model was tuned over the following parameters:
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# tuning parameters
+modelLookup(modelType)
+
+```
+
+The tuning profile is depicted immediately below.
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# define title name
+titleName <- "Root Mean Square Error By Model Parameter"
+# plot
+pcr_G1<-model_pcr$results %>% 
+  ggplot(aes(x = ncomp, y = RMSE)) +
+  geom_line() + geom_point(size = 1) +
+  labs(title = titleName, x = "Number of Components") + 
+  theme(legend.position = "top")
+
+```
+
+```{r,fig.height = 3, fig.width = 6,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+pcr_G1
+
+```
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# determine variable importance
+variableImportance_pcr<-varImp(model_pcr)
+
+```
+
+
+
+```{r,fig.height = 8, fig.width = 6,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# define title name
+TitleName<-'Principal Component Regression (PCR)'
+# plot predictor importance
+pcr_G2<-ggplot(variableImportance_pcr) + 
+  # add title and subtitle
+  labs(title='Variable Importance Ranking',subtitle=TitleName)
+
+```
+
+
+
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# apply model to training set
+model_pcr_train_p  <- predict(model_pcr, predictorsTrainTransformed)
+# create data frame
+df <- data.frame(obs = responseTrain, pred = model_pcr_train_p)
+# summary performance (out-of-sample)
+modelPerformanceTrain_pcr<-defaultSummary(df)
+
+# apply model to test set
+model_pcr_p  <- predict(model_pcr, predictorsTestTransformed)
+# create data frame
+df <- data.frame(obs = responseTest, pred = model_pcr_p)
+# summary performance (out-of-sample)
+modelPerformance_pcr<-defaultSummary(df)
+
+# combine in- and out- of-sample model performance
+performanceTable_pcr<-cbind(modelPerformanceTrain_pcr,
+  modelPerformance_pcr)
+# label
+colnames(performanceTable_pcr)<-c("Train","Test")
+
+```
+
+#### Partial Least Squares (PLS)
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# define model type
+modelType <- "pls"
+
+```
+
+```{r,cache=cacheFlag,eval=modelEvaluate,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# define tune length
+tuneN<-25
+# set random seed
+set.seed(randomSeed)
+# start timer
+startTime <- Sys.time()
+# train model
+model_pls <- train(predictorsDvTrainTransformed, responseTrain, 
+  method = modelType, trControl = modelControl, tuneLength = tuneN)
+# stop timer
+endTime <- Sys.time()
+# determine run time
+runTime_pls <- endTime - startTime
+# save model
+save(model_pls,runTime_pls,file = paste0(outputDirectory,
+  "model_pls.RData"))
+
+```
+
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+#plot(model_pls, main=model_pls$modelInfo$label)
+```
+
+
+The model was tuned over the following parameters:
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# tuning parameters
+modelLookup(modelType)
+
+```
+
+The tuning profile is depicted immediately below.
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# define title name
+titleName <- "Root Mean Square Error By Model Parameter"
+# plot
+pls_G1<-model_pls$results %>% 
+  ggplot(aes(x = ncomp, y = RMSE)) +
+  geom_line() + geom_point(size = 1) +
+  labs(title = titleName, x = "Number of Components") + 
+  theme(legend.position = "top")
+
+```
+
+```{r,fig.height = 3, fig.width = 6,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+pls_G1
+
+```
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# # determine variable importance
+# variableImportance_pls<-varImp(model_pls)
+
+```
+
+
+
+```{r,fig.height = 8, fig.width = 6,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# # define title name
+# TitleName<-'Principal Component Regression (PCR)'
+# # plot predictor importance
+# pls_G2<-ggplot(variableImportance_pls) + 
+#   # add title and subtitle
+#   labs(title='Variable Importance Ranking',subtitle=TitleName)
+
+```
+
+
+
+
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# apply model to training set
+model_pls_train_p  <- predict(model_pls, predictorsDvTrainTransformed)
+# create data frame
+df <- data.frame(obs = responseTrain, pred = model_pls_train_p)
+# summary performance (out-of-sample)
+modelPerformanceTrain_pls<-defaultSummary(df)
+
+# apply model to test set
+model_pls_p  <- predict(model_pls, predictorsDvTestTransformed)
+# create data frame
+df <- data.frame(obs = responseTest, pred = model_pls_p)
+# summary performance (out-of-sample)
+modelPerformance_pls<-defaultSummary(df)
+
+# combine in- and out- of-sample model performance
+performanceTable_pls<-cbind(modelPerformanceTrain_pls,
+  modelPerformance_pls)
+# label
+colnames(performanceTable_pls)<-c("Train","Test")
+
+```
+
+#### Elasticnet
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# define model type
+modelType <- "enet"
+
+```
+
+
+```{r,cache=cacheFlag,eval=modelEvaluate,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# set random seed
+set.seed(randomSeed)
+# start timer
+startTime <- Sys.time()
+# train model
+tg <- expand.grid(lambda = c(0, 0.05, .1), 
+  fraction = seq(0.05, 1, length = 25))
+model_enet <- train(predictorsDvTrainTransformed, responseTrain,
+  method = modelType, trControl = modelControl, tuneGrid = tg)
+# stop timer
+endTime <- Sys.time()
+# determine run time
+runTime_enet <- endTime - startTime
+# save model
+save(model_enet,runTime_enet,file = paste0(outputDirectory,
+  "model_enet.RData"))
+
+```
+
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+#plot(model_enet, main=model_enet$modelInfo$label)
+
+```
+
+
+The model was tuned over the following parameters:
+
+```{r,echo=showCodeFlag}
+# tuning parameters
+modelLookup(modelType)
+
+```
+
+The tuning profile is depicted immediately below.
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# define title name
+titleName <- "Root Mean Square Error By Model Parameter"
+# plot
+enet_G1<-model_enet$results %>% 
+  ggplot(aes(x = fraction, y = RMSE, col = factor(lambda))) +
+  geom_line() + geom_point(size = 1) +
+  labs(title = titleName, col = "lambda") + 
+  theme(legend.position = "top")
+
+```
+
+
+```{r,fig.height = 3, fig.width = 6,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+enet_G1
+
+```
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# determine variable importance
+variableImportance_enet<-varImp(model_enet)
+
+```
+
+
+
+```{r,fig.height = 8, fig.width = 6,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# define title name
+TitleName<-'Elasticnet'
+# plot predictor importance
+enet_G2<-ggplot(variableImportance_enet) +
+  # add title and subtitle
+  labs(title='Variable Importance Ranking',subtitle=TitleName)
+
+```
+
+
+
+
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# apply model to training set
+model_enet_train_p  <- predict(model_enet, predictorsDvTrainTransformed)
+# create data frame
+df <- data.frame(obs = responseTrain, pred = model_enet_train_p)
+# summary performance (out-of-sample)
+modelPerformanceTrain_enet<-defaultSummary(df)
+
+# apply model to test set
+model_enet_p  <- predict(model_enet, predictorsDvTestTransformed)
+# create data frame
+df <- data.frame(obs = responseTest, pred = model_enet_p)
+# summary performance (out-of-sample)
+modelPerformance_enet<-defaultSummary(df)
+
+# combine in- and out- of-sample model performance
+performanceTable_enet<-cbind(modelPerformanceTrain_enet,
+  modelPerformance_enet)
+# label
+colnames(performanceTable_enet)<-c("Train","Test")
+
+```
+
+### Nonlinear Regression Models
+
+Nonlinear regression models do not assume that the best fit can be modeled as a line.  They still attempt to model a prediction for pH based on mathematical relationships with the predictors, but they allow the use of nonlinear functions.  We tested 7 modeling approaches:  Averaged Neural Networks (ANN), 3 variations of Multivariate Adaptive Regression Splines (MARS), 2 variations of Support Vector Machines (SVM) and K-Nearest Neighbors (KNN).
+
+#### Model Averaged Neural Network (ANN)
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# define model type
+modelType <- "avNNet"
+
+```
+
+```{r,cache=cacheFlag,eval=modelEvaluate,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# define decay range
+decayRange<- c(0.01, .1,0.2,0.3,0.5)
+# define number of hidden units range
+nHiddenUnitsRange<-c(1:10)
+# define bagging flag
+bagFlag<-F
+# define trace flag
+traceFlag<-F
+# define max number of iterations
+maxIterationsN<-500
+# define parallel flag
+parallelFlag<-T
+# define max allowable number of weights
+maxNumberOfWeights<-10 * (nPredictorsRmNADv + 1) + 10 + 1
+# define linear output units flag
+linearOutputUnitsFlag<-T
+# set random seed
+set.seed(randomSeed)
+# start timer
+startTime <- Sys.time()
+# define parameter search grid
+tg <- expand.grid(decay=decayRange, size = nHiddenUnitsRange, 
+  bag = bagFlag)
+# train model
+model_avnnet <- train(predictorsDvTrainTransformed, responseTrain,
+  method = modelType, tuneGrid = tg, trControl = modelControl, 
+  linout = linearOutputUnitsFlag, MaxNWts = maxNumberOfWeights,
+  trace = traceFlag,maxit = maxIterationsN,allowParallel = parallelFlag)
+# stop timer
+endTime <- Sys.time()
+# determine run time
+runTime_avnnet <- endTime - startTime
+# save model
+save(model_avnnet,runTime_avnnet,file = paste0(outputDirectory,
+  "model_avnnet.RData"))
+
+```
+
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+#plot(model_avnnet, main=model_avnnet$modelInfo$label)
+
+```
+
+
+The model was tuned over the following parameters:
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# tuning parameters
+modelLookup(modelType)
+
+```
+
+The tuning profile is depicted immediately below.
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# define title name
+titleName <- "Root Mean Square Error By Model Parameter"
+# plot
+avnnet_G1<-model_avnnet$results %>% 
+  ggplot(aes(x = size, y = RMSE, col = factor(decay))) +
+  geom_line() + geom_point(size = 1) +
+  labs(title = titleName, col = "lambda") + 
+  theme(legend.position = "top")
+
+```
+
+
+```{r,fig.height = 3, fig.width = 6,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+avnnet_G1
+
+```
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# determine variable importance
+variableImportance_avnnet<-varImp(model_avnnet)
+
+```
+
+
+
+```{r,fig.height = 8, fig.width = 6,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# define title name
+TitleName<-'Model Averaged Neural Network'
+# plot predictor importance
+avnnet_G2<-ggplot(variableImportance_avnnet) +
+  # add title and subtitle
+  labs(title='Variable Importance Ranking',subtitle=TitleName)
+
+```
+
+
+
+
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# apply model to training set
+model_avnnet_train_p  <- predict(model_avnnet, predictorsDvTrainTransformed)
+# create data frame
+df <- data.frame(obs = responseTrain, pred = model_avnnet_train_p)
+# summary performance (out-of-sample)
+modelPerformanceTrain_avnnet<-defaultSummary(df)
+
+# apply model to test set
+model_avnnet_p  <- predict(model_avnnet, predictorsDvTestTransformed)
+# create data frame
+df <- data.frame(obs = responseTest, pred = model_avnnet_p)
+# summary performance (out-of-sample)
+modelPerformance_avnnet<-defaultSummary(df)
+
+# combine in- and out- of-sample model performance
+performanceTable_avnnet<-cbind(modelPerformanceTrain_avnnet,
+  modelPerformance_avnnet)
+# label
+colnames(performanceTable_avnnet)<-c("Train","Test")
+
+```
+
+
+
+
+
+#### Multivariate Adaptive Regression Spline (MARS)
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# define model type
+modelType <- "earth"
+
+```
+
+
+
+```{r,cache=cacheFlag,eval=modelEvaluate,echo=showCodeFlag,message=messageFlag}
+# set random seed
+set.seed(randomSeed)
+# define degree range
+degreeRange<-1:3
+# define n prune range
+nPruneRange<-2:30
+# start timer
+startTime <- Sys.time()
+# define grid
+tg <- expand.grid(degree = degreeRange, nprune = nPruneRange)
+# train model
+model_mars <- train(predictorsDvTrainTransformed, responseTrain,
+  method = modelType, tuneGrid = tg, trControl = modelControl)
+# stop timer
+endTime <- Sys.time()
+# determine run time
+runTime_mars <- endTime - startTime
+# save model
+save(model_mars,runTime_mars,file = paste0(outputDirectory,
+  "model_mars.RData"))
+
+```
+
+The model was tuned over the following parameters:
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# tuning parameters
+modelLookup(modelType)
+
+```
+
+The tuning profile is depicted immediately below.
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# define title name
+titleName <- "Root Mean Square Error By Model Parameter"
+# plot
+mars_G1<-model_mars$results %>% 
+  ggplot(aes(x = nprune, y = RMSE, col = factor(degree))) +
+  geom_line() + geom_point(size = 1) +
+  labs(title = titleName, col = "degree") + 
+  theme(legend.position = "top")
+
+```
+
+```{r,fig.height = 3, fig.width = 6,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+mars_G1
+
+```
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# determine variable importance
+variableImportance_mars<-varImp(model_mars)
+
+```
+
+
+
+```{r,fig.height = 8, fig.width = 6,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# define title name
+TitleName<-'MARS'
+# plot predictor importance
+mars_G2<-ggplot(variableImportance_mars) + 
+  # add title and subtitle
+  labs(title='Variable Importance Ranking',subtitle=TitleName)
+
+```
+
+
+
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# apply model to test set
+model_mars_train_p  <- predict(model_mars, predictorsDvTrainTransformed)
+# rename  column
+colnames(model_mars_train_p)<-'pred'
+# create data frame
+df <- data.frame(obs = responseTrain, pred = model_mars_train_p)
+# summary performance (out-of-sample)
+modelPerformanceTrain_mars<-defaultSummary(df)
+
+# apply model to test set
+model_mars_p  <- predict(model_mars, predictorsDvTestTransformed)
+# rename  column
+colnames(model_mars_p)<-'pred'
+# create data frame
+df <- data.frame(obs = responseTest, pred = model_mars_p)
+# summary performance (out-of-sample)
+modelPerformance_mars<-defaultSummary(df)
+
+# combine in- and out- of-sample model performance
+performanceTable_mars<-cbind(modelPerformanceTrain_mars,
+  modelPerformance_mars)
+# label
+colnames(performanceTable_mars)<-c("Train","Test")
+
+```
+
+
+#### Bagged Multivariate Adaptive Regression Splines (MARS)
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# define model type
+modelType <- "bagEarth"
+
+```
+
+
+
+```{r,cache=cacheFlag,eval=modelEvaluate,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# define degree range
+degreeRange<-1:3
+# define n prune range
+nPruneRange<-2:15
+# set random seed
+set.seed(randomSeed)
+# start timer
+startTime <- Sys.time()
+# define tuning grid
+tg<-expand.grid(degree = degreeRange, nprune = nPruneRange)
+# train model
+model_bagged_mars <- train(predictorsDvTrainTransformed, responseTrain, 
+  method = modelType,tuneGrid = tg,trControl = modelControl)
+# stop timer
+endTime <- Sys.time()
+# determine run time
+runTime_bagged_mars <- endTime - startTime
+# save model
+save(model_bagged_mars,runTime_bagged_mars,file = paste0(outputDirectory,
+  "model_bagged_mars.RData"))
+
+```
+
+The model was tuned over the following parameters:
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# tuning parameters
+modelLookup(modelType)
+
+```
+
+The tuning profile is depicted immediately below.
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# define title name
+titleName <- "Root Mean Square Error By Model Parameter"
+# plot
+bagged_mars_G1<-model_bagged_mars$results %>% 
+  ggplot(aes(x = nprune, y = RMSE, col = factor(degree))) +
+  geom_line() + geom_point(size = 1) +
+  labs(title = titleName, col = "degree") + 
+  theme(legend.position = "top")
+
+```
+
+```{r,fig.height = 3, fig.width = 6,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+bagged_mars_G1
+
+```
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# determine variable importance
+variableImportance_bagged_mars<-varImp(model_bagged_mars)
+
+```
+
+
+
+```{r,fig.height = 8, fig.width = 6,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# define title name
+TitleName<-'Bagged MARS'
+# plot predictor importance
+bagged_mars_G2<-ggplot(variableImportance_bagged_mars) + 
+  # add title and subtitle
+  labs(title='Variable Importance Ranking',subtitle=TitleName)
+
+```
+
+
+
+
+
+
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# apply model to training set
+model_bagged_mars_train_p  <- predict(model_bagged_mars, 
+  predictorsDvTrainTransformed)
+# create data frame
+df<-data.frame(obs = responseTrain, pred = model_bagged_mars_train_p)
+# summary performance (out-of-sample)
+modelPerformanceTrain_bagged_mars<-defaultSummary(df)
+
+# apply model to test set
+model_bagged_mars_p  <- predict(model_bagged_mars, 
+  predictorsDvTestTransformed)
+# create data frame
+df<-data.frame(obs = responseTest, pred = model_bagged_mars_p)
+# summary performance (out-of-sample)
+modelPerformance_bagged_mars<-defaultSummary(df)
+
+# combine in- and out- of-sample model performance
+performanceTable_bagged_mars<-cbind(modelPerformanceTrain_bagged_mars,
+  modelPerformance_bagged_mars)
+# label
+colnames(performanceTable_bagged_mars)<-c("Train","Test")
+
+```
+
+
+
+#### Bagged Multivariate Adaptive Regression Splines (MARS) using gCV Pruning
+
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# define model type
+modelType <- "bagEarthGCV"
+
+```
+
+
+```{r,cache=cacheFlag,eval=modelEvaluate,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# define degree range
+degreeRange<-1:3
+# set random seed
+set.seed(randomSeed)
+# start timer
+startTime <- Sys.time()
+# define tuning grid
+tg<-expand.grid(degree = degreeRange)
+# train model
+model_bagged_gCV_mars <- train(predictorsDvTrainTransformed, responseTrain, 
+  method = modelType,tuneGrid = tg,trControl = modelControl)
+# stop timer
+endTime <- Sys.time()
+# determine run time
+runTime_bagged_gCV_mars <- endTime - startTime
+# save model
+save(model_bagged_gCV_mars,runTime_bagged_gCV_mars,
+  file = paste0(outputDirectory,"model_bagged_gCV_mars.RData"))
+
+```
+
+
+
+The model was tuned over the following parameters:
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# tuning parameters
+modelLookup(modelType)
+
+```
+
+The tuning profile is depicted immediately below.
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# define title name
+titleName <- "Root Mean Square Error By Model Parameter"
+# plot
+bagged_gCV_mars_G1<-model_bagged_gCV_mars$results %>% 
+  ggplot(aes(x = degree, y = RMSE)) +
+  geom_line() + geom_point(size = 1) +
+  labs(title = titleName)
+
+```
+
+```{r,fig.height = 3, fig.width = 6,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+bagged_gCV_mars_G1
+
+```
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# determine variable importance
+variableImportance_bagged_gCV_mars<-varImp(model_bagged_gCV_mars)
+
+```
+
+
+
+```{r,fig.height = 8, fig.width = 6,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# define title name
+TitleName<-'MARS using gCV Pruning'
+# plot predictor importance
+bagged_gCV_mars_G2<-ggplot(variableImportance_bagged_gCV_mars) + 
+  # add title and subtitle
+  labs(title='Variable Importance Ranking',subtitle=TitleName)
+
+```  
+
+
+
+
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# apply model to training set
+model_bagged_gCV_mars_train_p  <- predict(model_bagged_gCV_mars, 
+  predictorsDvTrainTransformed)
+# create data frame
+df <- data.frame(obs = responseTrain, pred = model_bagged_gCV_mars_train_p)
+# summary performance (out-of-sample)
+modelPerformanceTrain_bagged_gCV_mars<-defaultSummary(df)
+
+# apply model to test set
+model_bagged_gCV_mars_p  <- predict(model_bagged_gCV_mars, 
+  predictorsDvTestTransformed)
+# create data frame
+df <- data.frame(obs = responseTest, pred = model_bagged_gCV_mars_p)
+# summary performance (out-of-sample)
+modelPerformance_bagged_gCV_mars<-defaultSummary(df)
+
+# combine in- and out- of-sample model performance
+performanceTable_bagged_gCV_mars<-cbind(modelPerformanceTrain_bagged_gCV_mars,
+  modelPerformance_bagged_gCV_mars)
+# label
+colnames(performanceTable_bagged_gCV_mars)<-c("Train","Test")
+
+```
+
+
+
+#### Support Vector Machines with Radial Kernel (SVM)
+
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# define model type
+modelType <- "svmRadial"
+
+```
+
+
+```{r,cache=cacheFlag,eval=modelEvaluate,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# set random seed
+set.seed(randomSeed)
+# start timer
+startTime <- Sys.time()
+# train model
+model_svm <- train(predictorsDvTrainTransformed, responseTrain, 
+  method = modelType, tuneLength = tuneN,trControl = modelControl)
+# stop timer
+endTime <- Sys.time()
+# determine run time
+runTime_svm <- endTime - startTime
+# save model
+save(model_svm,runTime_svm,file = paste0(outputDirectory,
+  "model_svm.RData"))
+
+```
+
+The model was tuned over the following parameters:
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# tuning parameters
+modelLookup(modelType)
+
+```
+
+The tuning profile is depicted immediately below.
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# define title name
+titleName <- "Root Mean Square Error By Model Parameter"
+# plot
+svm_G1<-model_svm$results %>% 
+  ggplot(aes(x = C, y = RMSE)) +
+  scale_x_continuous(trans = "log") +
+  geom_line() + geom_point(size = 1) +
+  labs(title = titleName,x = 'log(Cost)')
+
+```
+
+```{r,fig.height = 3, fig.width = 6,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+svm_G1
+
+```
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# determine variable importance
+variableImportance_svm<-varImp(model_svm)
+
+```
+
+
+
+```{r,fig.height = 8, fig.width = 6,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# define title name
+TitleName<-'SVM'
+# plot predictor importance
+svm_G2<-ggplot(variableImportance_svm) + 
+  # add title and subtitle
+  labs(title='Variable Importance Ranking',subtitle=TitleName)
+
+variableImportance_svm<-varImp(model_svm)
+  
+```
+
+
+
+
+
+
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# apply model to training set
+model_svm_train_p  <- predict(model_svm, predictorsDvTrainTransformed)
+# create data frame
+df<-data.frame(obs = responseTrain, pred = model_svm_train_p)
+# summary performance (out-of-sample)
+modelPerformanceTrain_svm<-defaultSummary(df)
+
+# apply model to test set
+model_svm_p  <- predict(model_svm, predictorsDvTestTransformed)
+# create data frame
+df<-data.frame(obs = responseTest, pred = model_svm_p)
+# summary performance (out-of-sample)
+modelPerformance_svm<-defaultSummary(df)
+
+# combine in- and out- of-sample model performance
+performanceTable_svm<-cbind(modelPerformanceTrain_svm,
+  modelPerformance_svm)
+# label
+colnames(performanceTable_svm)<-c("Train","Test")
+
+```
+
+
+#### Support Vector Machines with Polynomial Kernel (SVM)
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# define model type
+modelType <- "svmPoly"
+
+```
+
+
+```{r,cache=cacheFlag,eval=modelEvaluate,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# cost range
+costRange<-c(0.01,0.05,0.1,0.25,0.5)
+# define degree range
+degreeRange<-c(1,2,3,4,5)
+# define scale range
+scaleRange<-c(0.25,0.5,1)
+# set random seed
+set.seed(randomSeed)
+# start timer
+startTime <- Sys.time()
+# train model
+tg <- expand.grid(C=costRange, degree=degreeRange, scale=scaleRange)
+# train model
+model_svm2 <- train(predictorsDvTrainTransformed, responseTrain,
+  method = modelType,  tuneGrid = tg,  trControl = modelControl)
+# stop timer
+endTime <- Sys.time()
+# determine run time
+runTime_svm2 <- endTime - startTime
+# save model
+save(model_svm2,runTime_svm2,file = paste0(outputDirectory,
+  "model_svm2.RData"))
+
+```
+
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+#plot(model_svm2, main=model_svm2$modelInfo$label)
+
+```
+
+The model was tuned over the following parameters:
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# tuning parameters
+modelLookup(modelType)
+
+```
+
+The tuning profile is depicted immediately below.
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# define title name
+titleName <- "Root Mean Square Error By Model Parameter"
+# plot
+svm2_G1<-model_svm2$results %>% 
+  ggplot(aes(x = C, y = RMSE)) +
+  scale_x_continuous(trans = "log") +
+  geom_line() + geom_point(size = 1) +
+  labs(title = titleName,x = 'log(Cost)')
+
+```
+
+```{r,fig.height = 3, fig.width = 6,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+#svm2_G1
+
+```
+
+```{r,fig.height = 6, fig.width = 6,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+plot(model_svm2, main=model_svm2$modelInfo$label)
+
+```
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# determine variable importance
+variableImportance_svm2<-varImp(model_svm2)
+
+```
+
+
+
+```{r,fig.height = 8, fig.width = 6,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# define title name
+TitleName<-'SVM'
+# plot predictor importance
+svm2_G2<-ggplot(variableImportance_svm2) + 
+  # add title and subtitle
+  labs(title='Variable Importance Ranking',subtitle=TitleName)
+
+variableImportance_svm2<-varImp(model_svm2)
+  
+```
+
+
+
+
+
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# apply model to training set
+model_svm2_train_p  <- predict(model_svm2, predictorsDvTrainTransformed)
+# create data frame
+df<-data.frame(obs = responseTrain, pred = model_svm2_train_p)
+# summary performance (out-of-sample)
+modelPerformanceTrain_svm2<-defaultSummary(df)
+
+# apply model to test set
+model_svm2_p  <- predict(model_svm2, predictorsDvTestTransformed)
+# create data frame
+df<-data.frame(obs = responseTest, pred = model_svm2_p)
+# summary performance (out-of-sample)
+modelPerformance_svm2<-defaultSummary(df)
+
+# combine in- and out- of-sample model performance
+performanceTable_svm2<-cbind(modelPerformanceTrain_svm2,
+  modelPerformance_svm2)
+# label
+colnames(performanceTable_svm2)<-c("Train","Test")
+
+```
+
+#### $K$-Nearest Neighbors (KNN)
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# define model type
+modelType <- "knn"
+
+```
+
+```{r,cache=cacheFlag,eval=modelEvaluate,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# define k range
+kRange<-1:20
+# set random seed
+set.seed(randomSeed)
+# start timer
+startTime <- Sys.time()
+# train model
+tg <- data.frame(k = kRange)
+model_knn <- train(predictorsDvTrainTransformed, responseTrain,
+  method = modelType, tuneGrid = tg, trControl = modelControl)
+# stop timer
+endTime <- Sys.time()
+# determine run time
+runTime_knn <- endTime - startTime
+# save model
+save(model_knn,runTime_knn, file = paste0(outputDirectory,
+  "model_knn.RData"))
+
+```
+
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+#plot(model_knn, main=model_knn$modelInfo$label)
+
+```
+
+The model was tuned over the following parameters:
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# tuning parameters
+modelLookup(modelType)
+
+```
+
+The tuning profile is depicted immediately below.
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# define title name
+titleName <- "Root Mean Square Error By Model Parameter"
+# define x label
+xLabel = ' Number of Neighbors (k)'
+# plot
+knn_G1<-model_knn$results %>% 
+  ggplot(aes(x = k, y = RMSE)) +
+  geom_line() + geom_point(size = 1) +
+  labs(title = titleName,x=xLabel)
+
+```
+
+```{r,fig.height = 3, fig.width = 6,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+knn_G1
+
+```
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# determine variable importance
+variableImportance_knn<-varImp(model_knn)
+
+```
+
+
+
+```{r,fig.height = 8, fig.width = 6,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# define title name
+TitleName<-'K-Nearest Neighbors (KNN)'
+# plot predictor importance
+knn_G2<-ggplot(variableImportance_knn) + 
+  # add title and subtitle
+  labs(title='Variable Importance Ranking',subtitle=TitleName)
+
+variableImportance_knn<-varImp(model_knn)
+  
+```
+
+
+
+
+
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# apply model to training set
+model_knn_train_p  <- predict(model_knn, predictorsDvTrainTransformed)
+# create data frame
+df<-data.frame(obs = responseTrain, pred = model_knn_train_p)
+# summary performance (out-of-sample)
+modelPerformanceTrain_knn<-defaultSummary(df)
+
+# apply model to test set
+model_knn_p  <- predict(model_knn, predictorsDvTestTransformed)
+# create data frame
+df<-data.frame(obs = responseTest, pred = model_knn_p)
+# summary performance (out-of-sample)
+modelPerformance_knn<-defaultSummary(df)
+
+# combine in- and out- of-sample model performance
+performanceTable_knn<-cbind(modelPerformanceTrain_knn,
+  modelPerformance_knn)
+# label
+colnames(performanceTable_knn)<-c("Train","Test")
+
+```
+
+### Tree-based Regression Models
+
+The third overall approach we tried was to use tree-based models.  These algorithms utilize decision trees, which branch out the data based on a series of either/or splits.  We looked at 4 approaches:  Classification and Regression Tree (CART), Random Forest (RF), Stochastic Gradient Boosting (SGB) and Cubist.  Once again, we tuned each model, looking to optimize RMSE.
+
+#### Classification and Regression Tree (CART)
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# define model type
+modelType <- "rpart2"
+
+```
+
+```{r,cache=cacheFlag,eval=modelEvaluate,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# set random seed
+set.seed(randomSeed)
+# start timer
+startTime <- Sys.time()
+# define grid
+tg <- expand.grid(maxdepth= seq(1,20,by=1))
+# train model
+model_cart <- train(predictorsDvTrainTransformed, responseTrain,
+  method = modelType, tuneGrid = tg, trControl = modelControl)
+# stop timer
+endTime <- Sys.time()
+# determine run time
+runTime_cart <- endTime - startTime
+# save model
+save(model_cart,runTime_cart,file = paste0(outputDirectory,
+  "model_cart.RData"))
+
+```
+
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+#plot(model_cart, main=model_cart$modelInfo$label)
+
+```
+
+
+The model was tuned over the following parameters:
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# tuning parameters
+modelLookup(modelType)
+
+```
+
+The tuning profile is depicted immediately below.
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# define title name
+titleName <- "Root Mean Square Error By Model Parameter"
+# define x label
+xLabel = 'Max Tree Depth'
+# plot
+cart_G1<-model_cart$results %>% 
+  ggplot(aes(x = maxdepth, y = RMSE)) +
+  geom_line() + geom_point(size = 1) +
+  labs(title = titleName,x=xLabel)
+
+```
+
+```{r,fig.height = 3, fig.width = 6,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+cart_G1
+
+```
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# determine variable importance
+variableImportance_cart<-varImp(model_cart)
+
+```
+
+
+
+```{r,fig.height = 8, fig.width = 6,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# define title name
+TitleName<-'Classification and Regression Tree (CART)'
+# plot predictor importance
+cart_G2<-ggplot(variableImportance_cart) + 
+  # add title and subtitle
+  labs(title='Variable Importance Ranking',subtitle=TitleName)
+
+variableImportance_cart<-varImp(model_cart)
+  
+```
+
+
+
+
+
+
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# apply model to training set
+model_cart_train_p  <- predict(model_cart, predictorsDvTrainTransformed)
+# create data frame
+df<-data.frame(obs = responseTrain, pred = model_cart_train_p)
+# summary performance (out-of-sample)
+modelPerformanceTrain_cart<-defaultSummary(df)
+
+# apply model to test set
+model_cart_p  <- predict(model_cart, predictorsDvTestTransformed)
+# create data frame
+df<-data.frame(obs = responseTest, pred = model_cart_p)
+# summary performance (out-of-sample)
+modelPerformance_cart<-defaultSummary(df)
+
+# combine in- and out- of-sample model performance
+performanceTable_cart<-cbind(modelPerformanceTrain_cart,
+  modelPerformance_cart)
+# label
+colnames(performanceTable_cart)<-c("Train","Test")
+
+```
+
+#### Random Forest
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# define model type
+modelType <- "rf"
+
+```
+
+```{r,cache=cacheFlag,eval=modelEvaluate,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# define importance flag
+importanceFlag<-TRUE
+# set random seed
+set.seed(randomSeed)
+# start timer
+startTime <- Sys.time()
+P <- ncol(predictorsTrainTransformed)
+# define grid
+tg <- expand.grid(mtry=seq(2, P, by = floor(P/5)))
+# train model
+model_rf <- train(predictorsTrainTransformed, responseTrain,
+  method = modelType, tuneGrid = tg, trControl = modelControl,
+  importance = importanceFlag)
+# stop timer
+endTime <- Sys.time()
+# determine run time
+runTime_rf <- endTime - startTime
+# save model
+save(model_rf,runTime_rf,file = paste0(outputDirectory,
+  "model_rf.RData"))
+
+```
+
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+#plot(model_rf, main=model_rf$modelInfo$label)
+
+```
+
+The model was tuned over the following parameters:
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# tuning parameters
+modelLookup(modelType)
+
+```
+
+The tuning profile is depicted immediately below.
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# define title name
+titleName <- "Root Mean Square Error By Model Parameter"
+# define x label
+xLabel = 'Parameter'
+# plot
+rf_G1<-model_rf$results %>% 
+  ggplot(aes(x = mtry, y = RMSE)) +
+  geom_line() + geom_point(size = 1) +
+  labs(title = titleName,x=xLabel)
+
+```
+
+```{r,fig.height = 3, fig.width = 6,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+rf_G1
+
+```
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# determine variable importance
+variableImportance_rf<-varImp(model_rf)
+
+```
+
+
+
+```{r,fig.height = 8, fig.width = 6,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# define title name
+TitleName<-'Random Forest'
+# plot predictor importance
+rf_G2<-ggplot(variableImportance_rf) + 
+  # add title and subtitle
+  labs(title='Variable Importance Ranking',subtitle=TitleName)
+
+variableImportance_rf<-varImp(model_rf)
+  
+```
+
+
+
+
+
+
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# apply model to training set
+model_rf_train_p  <- predict(model_rf, predictorsTrainTransformed)
+# create data frame
+df<-data.frame(obs = responseTrain, pred = model_rf_train_p)
+# summary performance (out-of-sample)
+modelPerformanceTrain_rf<-defaultSummary(df)
+
+# apply model to test set
+model_rf_p  <- predict(model_rf, predictorsTestTransformed)
+# create data frame
+df<-data.frame(obs = responseTest, pred = model_rf_p)
+# summary performance (out-of-sample)
+modelPerformance_rf<-defaultSummary(df)
+
+# combine in- and out- of-sample model performance
+performanceTable_rf<-cbind(modelPerformanceTrain_rf,
+  modelPerformance_rf)
+# label
+colnames(performanceTable_rf)<-c("Train","Test")
+
+```
+
+
+#### Stochastic Gradient Boosting (SGB)
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# define model type
+modelType <- "gbm"
+
+```
+
+```{r,cache=cacheFlag,eval=modelEvaluate,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# define interaction depth
+interactionDepth<-seq(1,10,by=1)
+# define number of trees
+nTrees<-c(25,50,100,200)
+# define shrinkage
+shrinkageRange<-c(0.01,0.05,0.1,0.2)
+# define minimum terminal node size
+minTerminalNodeSize<-10
+# set random seed
+set.seed(randomSeed)
+# start timer
+startTime <- Sys.time()
+# define grid
+tg <- expand.grid(interaction.depth=interactionDepth, n.trees=nTrees,
+  shrinkage=shrinkageRange, n.minobsinnode=minTerminalNodeSize)
+# train model
+model_gbm <- train(predictorsDvTrainTransformed, responseTrain,
+  method = modelType, tuneGrid = tg, trControl = modelControl, 
+  verbose=F)
+# ,importance = importanceFlag
+# stop timer
+endTime <- Sys.time()
+# determine run time
+runTime_gbm <- endTime - startTime
+# save model
+save(model_gbm,runTime_gbm,file = paste0(outputDirectory,
+  "model_gbm.RData"))
+
+```
+
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+#plot(model_gbm, main=model_gbm$modelInfo$label)
+
+```
+
+The model was tuned over the following parameters:
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# tuning parameters
+modelLookup(modelType)
+
+```
+
+The tuning profile is depicted immediately below.
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# # define title name
+# titleName <- "Root Mean Square Error \n By Model Parameter"
+# # define x label
+# xLabel = 'Number of Committees'
+# # plot
+# gbm_G1<-model_gbm$results %>% 
+#   ggplot(aes(x = maxdepth, y = RMSE)) +
+#   geom_line() + geom_point(size = 1) +
+#   labs(title = titleName,x=xLabel)
+
+```
+
+
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# # determine variable importance
+# variableImportance_gbm<-varImp(model_gbm)
+
+```
+
+
+
+```{r,fig.height = 8, fig.width = 6,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# # define title name
+# TitleName<-'Stochastic Gradient Boosting (SGB)'
+# # plot predictor importance
+# gbm_G2<-ggplot(variableImportance_gbm) + 
+#   # add title and subtitle
+#   labs(title='Variable Importance Ranking',subtitle=TitleName)
+# 
+# variableImportance_gbm<-varImp(model_gbm)
+  
+```
+
+
+```{r,fig.height = 6, fig.width = 6,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+plot(model_gbm, main=model_gbm$modelInfo$label)
+
+```
+
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# apply model to training set
+model_gbm_train_p  <- predict(model_gbm, predictorsDvTrainTransformed)
+# create data frame
+df<-data.frame(obs = responseTrain, pred = model_gbm_train_p)
+# summary performance (out-of-sample)
+modelPerformanceTrain_gbm<-defaultSummary(df)
+
+# apply model to test set
+model_gbm_p  <- predict(model_gbm, predictorsDvTestTransformed)
+# create data frame
+df<-data.frame(obs = responseTest, pred = model_gbm_p)
+# summary performance (out-of-sample)
+modelPerformance_gbm<-defaultSummary(df)
+
+# combine in- and out- of-sample model performance
+performanceTable_gbm<-cbind(modelPerformanceTrain_gbm,
+  modelPerformance_gbm)
+# label
+colnames(performanceTable_gbm)<-c("Train","Test")
+
+```
+
+#### Rule-Based Cubist
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# define model type
+modelType <- "cubist"
+
+```
+
+```{r,cache=cacheFlag,eval=modelEvaluate,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# define number of committees
+nCommittees<-c(1,5,10,20,50,100)
+# define number of neighbors
+nNeighbors<-c(0,1,3,5,7)
+# set random seed
+set.seed(randomSeed)
+# start timer
+startTime <- Sys.time()
+# define grid
+tg <- expand.grid(committees = nCommittees, neighbors = nNeighbors)
+# train model
+model_cubist <- train(predictorsTrainTransformed, responseTrain,
+  method = modelType, tuneGrid = tg, trControl = modelControl)
+# stop timer
+endTime <- Sys.time()
+# determine run time
+runTime_cubist <- endTime - startTime
+# save model
+save(model_cubist,runTime_cubist,file = paste0(outputDirectory,
+  "model_cubist.RData"))
+
+```
+
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+#plot(model_cubist, main=model_cubist$modelInfo$label)
+
+```
+
+The model was tuned over the following parameters:
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# tuning parameters
+modelLookup(modelType)
+
+```
+
+The tuning profile is depicted immediately below.
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# define title name
+titleName <- "Root Mean Square Error By Model Parameter"
+# define x label
+xLabel = 'Number of Committees'
+# plot
+cubist_G1<-model_cubist$results %>%
+  ggplot(aes(x = committees, y = RMSE,col=factor(neighbors))) +
+  geom_line() + geom_point(size = 1) +
+  labs(title = titleName,x=xLabel,col='Number of Instances')+
+  theme(legend.position = "top")
+
+```
+
+
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# determine variable importance
+variableImportance_cubist<-varImp(model_cubist)
+
+```
+
+
+
+```{r,fig.height = 8, fig.width = 6,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# define title name
+TitleName<-'Rule-Based Cubist'
+# plot predictor importance
+cubist_G2<-ggplot(variableImportance_cubist) + 
+  # add title and subtitle
+  labs(title='Variable Importance Ranking',subtitle=TitleName)
+
+variableImportance_cubist<-varImp(model_cubist)
+  
+```
+
+
+
+```{r,fig.height = 3, fig.width = 6,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+cubist_G1
+```
+
+
+
+
+
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# apply model to training set
+model_cubist_train_p  <- predict(model_cubist, predictorsTrainTransformed)
+# create data frame
+df<-data.frame(obs = responseTrain, pred = model_cubist_train_p)
+# summary performance (out-of-sample)
+modelPerformanceTrain_cubist<-defaultSummary(df)
+
+# apply model to test set
+model_cubist_p  <- predict(model_cubist, predictorsTestTransformed)
+# create data frame
+df<-data.frame(obs = responseTest, pred = model_cubist_p)
+# summary performance (out-of-sample)
+modelPerformance_cubist<-defaultSummary(df)
+
+# combine in- and out- of-sample model performance
+performanceTable_cubist<-cbind(modelPerformanceTrain_cubist,
+  modelPerformance_cubist)
+# label
+colnames(performanceTable_cubist)<-c("Train","Test")
+
+```
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# save all models to single RData output file
+save(model_rlm,model_pcr,model_pls,model_enet,model_avnnet,model_mars,
+  model_bagged_mars,model_bagged_gCV_mars,model_svm,model_svm2,model_knn,
+  model_cart,model_rf,model_gbm,model_cubist,
+  file=paste0(outputDirectory,"allModels.RData"))
+
+```
+
+## Model Selection
+
+After tuning each model using the process described above, we applied each model to our test set, then compared the performance to the mean performance of the repeated K-fold cross-validation. Performance was relatively stable moving from the training set to the test set.
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+
+# default summary is a wrapper around post-resample
+
+# combine model performance
+performanceTrainLinear<-rbind(modelPerformanceTrain_rlm,modelPerformanceTrain_pcr,
+modelPerformanceTrain_pls,modelPerformanceTrain_enet)
+# add model names
+row.names(performanceTrainLinear)<-c('RLM','PCR','PLS','ENET')
+# create data frame
+trainLinear <- data.frame(performanceTrainLinear)
+
+# combine model performance
+performanceTrainNonLinear<-rbind(modelPerformanceTrain_avnnet,
+  modelPerformanceTrain_mars,modelPerformanceTrain_bagged_mars,
+  modelPerformanceTrain_bagged_gCV_mars,modelPerformanceTrain_svm,
+  modelPerformanceTrain_svm2,modelPerformanceTrain_knn)
+# add model names
+row.names(performanceTrainNonLinear)<-c('ANN','MARS','Bagged MARS',
+  'Bagged MARS (gCV)','SVM (Radial)','SVM (Polynomial)','KNN')
+# create data frame
+trainNonLinear <- data.frame(performanceTrainNonLinear)
+
+# combine model performance
+performanceTrainTree<-rbind(modelPerformanceTrain_cart,modelPerformanceTrain_gbm,
+  modelPerformanceTrain_rf,modelPerformanceTrain_cubist)
+# add model names
+row.names(performanceTrainTree)<-c('CART','GBM','RF','Cubist')
+# create data frame
+trainTree <- data.frame(performanceTrainTree)
+
+```
+
+
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+
+# default summary is a wrapper around post-resample
+
+# combine model performance
+performanceTestLinear<-rbind(modelPerformance_rlm,modelPerformance_pcr,
+modelPerformance_pls,modelPerformance_enet)
+# add model names
+row.names(performanceTestLinear)<-c('RLM','PCR','PLS','ENET')
+# create data frame
+validationLinear <- data.frame(performanceTestLinear)
+
+# combine model performance
+performanceTestNonLinear<-rbind(modelPerformance_avnnet,
+  modelPerformance_mars,modelPerformance_bagged_mars,
+  modelPerformance_bagged_gCV_mars,modelPerformance_svm,
+  modelPerformance_svm2,modelPerformance_knn)
+# add model names
+row.names(performanceTestNonLinear)<-c('ANN','MARS','Bagged MARS',
+  'Bagged MARS (gCV)','SVM (Radial)','SVM (Polynomial)','KNN')
+# create data frame
+validationNonLinear <- data.frame(performanceTestNonLinear)
+
+# combine model performance
+performanceTestTree<-rbind(modelPerformance_cart,modelPerformance_gbm,
+  modelPerformance_rf,modelPerformance_cubist)
+# add model names
+row.names(performanceTestTree)<-c('CART','GBM','RF','Cubist')
+# create data frame
+validationTree <- data.frame(performanceTestTree)
+
+```
+
+
+
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+
+# runTime <-list("RLM"=runTime_rlm,"PCR"=runTime_pcr,"PLS"=runTime_pls,
+#   "Elasticnet"=runTime_enet,"ANN"=runTime_avnnet,"MARS"=runTime_mars,
+#   "Bagged MARS"=runTime_bagged_mars,"Bagged MARS (gCV)"=runTime_bagged_gCV_mars,
+#   "SVMr"=runTime_svm,"SVMp"=runTime_svm2,"KNN"=runTime_knn,"CART"=runTime_cart,
+#   "RF"=runTime_rf,"GBM"=runTime_gbm,"Cubist"=runTime_cubist)
+
+# create object for resampled performance
+rValues <- resamples(list("RLM"=model_rlm,"PCR"=model_pcr,"PLS"=model_pls,
+  "Elasticnet"=model_enet,"ANN"=model_avnnet,"MARS"=model_mars,
+  "Bagged MARS"=model_bagged_mars,"Bagged MARS (gCV)"=model_bagged_gCV_mars,
+  "SVMr"=model_svm,"SVMp"=model_svm2,"KNN"=model_knn,"CART"=model_cart,
+  "RF"=model_rf,"GBM"=model_gbm,"Cubist"=model_cubist))
+# create resampled performance summary
+modelPerformanceSummary<-summary(rValues)
+# create dataframes
+modelPerformanceSummaryTableRMSE<-data.frame(modelPerformanceSummary$statistics$RMSE)
+modelPerformanceSummaryTableR2<-data.frame(modelPerformanceSummary$statistics$Rsquared)
+# extract mean repeated CV out-of-fold performance
+trainResampleSummary<-cbind(modelPerformanceSummaryTableRMSE['Mean'],
+  modelPerformanceSummaryTableR2['Mean'])
+# combine repeated CV out-of-fold performance statistics and test performance
+performanceSummaryTable<-cbind(trainResampleSummary,rbind(validationLinear,
+  validationNonLinear,validationTree))
+# add labels
+colnames(performanceSummaryTable)<-c("Mean RMSE",
+  paste("Mean","R^2"),"RMSE","R^2",
+  "MAE")
+
+```
+
+**Training Based Repeated K-Fold Cross-Validation & Test Performance By Model**
+
+
+`r pander(round(performanceSummaryTable,4))`
+
+
+**Repeated K-Fold Cross-Validation Performance Summary By Model ($R^{2}$)**
+
+```{r,fig.height = 5, fig.width = 6,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# plot ranked r-squared for each model
+bwplot(rValues,metric="Rsquared")
+
+```
+
+**Repeated K-Fold Cross-Validation Performance Summary By Model ($R^{2}$)**
+
+`r pander(round(modelPerformanceSummary$statistics$Rsquared,4))`
+
+**Repeated K-Fold Cross-Validation Performance Summary By Model (RMSE)**
+
+```{r,fig.height = 5, fig.width = 6,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+bwplot(rValues,metric="RMSE")
+
+```
+
+**Repeated Cross-Validation Performance Summary By Model (RMSE)**
+
+`r pander(round(modelPerformanceSummary$statistics$RMSE,4))`
+
+It is apparent from the compartive plots and tables above that use of ensemble techniques improves our results. 
+
+Based on the performance metrics, two tree-based models performed best:  Random Forest and Cubist.  Random Forest models create an ensemble of decision trees - using a multitude of trees to correct for overfitting.  Cubist models create decision trees and then collapse them into rules.  The rules help define the predicted values.  In our case, this approach had the highest R-squared for best fit and the lowest errors measured by RMSE and MAE.  Therefore, we chose this approach to continue our study.
+
+
+## Model Interpretation (Selected Model)
+
+In this section, we examine the variable importance and partial dependence plots corresponding to our selected model.
+
+**Variable Importance (Selected Model)**
+
+```{r,fig.height = 8, fig.width = 6,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+cubist_G2
+```
+
+
+
+**Partial Dependence for Top 10 Predictors (Selected Model)**
+
+Another common way to improve our understanding of complex models - particularly those constructed from ensembles of models - is to compute and review the partial dependence of the highest importance predictors. The partial dependence profile shows us how each predictor impacts the response (holding all other predictors constant), based on our tuned model.
+
+The following plot depicts the partial dependence for the top 10 predictors:
+
+```{r,fig.height = 8, fig.width = 6,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# extract variable importance
+IV<-data.frame(variableImportance_cubist$importance)
+# define number of predictors to plot
+topN<-10
+# iterate over each predictor and determine partial dependence
+pd<-NULL
+for (predictorName in row.names(IV)[order(-IV$Overall)][1:topN]){
+  tmp<-partial(model_cubist,pred.var=predictorName)
+  names(tmp)<-c("predictor","response")
+  pd<-rbind(pd,cbind(tmp,predictorName=predictorName))
+}
+# add variable importance plot
+cubist_pdp<-ggplot(pd, aes(predictor, response)) +
+  geom_line() +
+  facet_wrap(~ predictorName, scales = "free",ncol=2)
+# plot
+cubist_pdp
+
+```
+
+In the plot above, we can see that *increasing* the manufacturing flow, density, balling, and oxygen filler generally *reduces* the pH. In contrast, *decreasing* `Alch.Rel`, filler speed, air pressurer, and hydraulic pressure (#3) tends to *reduce* the pH. Finally, the relationships between pH and both balling level and pressure vacuum are more complex. For balling level, as the variable increases, the pH tends to *rise*, while a decrease initially increases the pH, then the response levels off. For pressure vacuum, as we move further away from 0.5, the pH tends to *drop*.
+
+### Final Model (Tuned on Training & Test Sets)
+
+After selecting the Cubist model based on the training and test set performance, we re-trained the model using both the training and test sets before making our final prediction.
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# add test and train data for predictors and response
+predictorsFull<-rbind(predictorsTrainTransformed, predictorsTestTransformed)
+#responseFull<-rbind(responseTrain,responseTest)
+responseFull<-c(responseTrain,responseTest)
+```
+
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# define model type
+modelType <- "cubist"
+
+```
+
+
+```{r,eval=modelEvaluate,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# define number of committees
+nCommittees<-c(1,5,10,20,50,100)
+# define number of neighbors
+nNeighbors<-c(0,1,3,5,7)
+# set random seed
+set.seed(randomSeed)
+# start timer
+startTime <- Sys.time()
+# define grid
+tg <- expand.grid(committees = nCommittees, neighbors = nNeighbors)
+# train model
+model_cubist_full <- train(predictorsFull, responseFull,
+  method = modelType, tuneGrid = tg, trControl = modelControl)
+# stop timer
+endTime <- Sys.time()
+# determine run time
+runTime_cubist_full <- endTime - startTime
+# save model
+save(model_cubist_full,runTime_cubist_full,file = paste0(outputDirectory,
+  "model_cubist_full.RData"))
+
+```
+
+
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# # resample
+FullResample <-postResample(pred = predict(model_cubist_full,
+  newdata = predictorsFull), obs = responseFull)
+# 
+rValues_Full<- resamples(list("Cubist (Train)"=model_cubist,
+  "Cubist (Train+Test)"=model_cubist_full))
+# create resampled performance summary
+finalModelPerformanceSummary<-summary(rValues_Full)
+# create dataframes
+finalModelPerformanceSummaryTableRMSE<-data.frame(finalModelPerformanceSummary$statistics$RMSE)
+finalModelPerformanceSummaryTableR2<-data.frame(finalModelPerformanceSummary$statistics$Rsquared)
+# extract mean repeated CV out-of-fold performance
+trainResampleSummary<-cbind(finalModelPerformanceSummaryTableRMSE['Mean'],
+  finalModelPerformanceSummaryTableR2['Mean'])
+colnames(trainResampleSummary)<-c('Mean RMSE','Mean R^2')
+
+```
+
+**Repeated Cross-Validation Performance Summary - Final Model**
+
+`r pander(trainResampleSummary)`
+
+There was only a small diffence between to the first version of our selected model and this second, re-trained version of the model.
+
+## Out-of-Sample Predictions
+
+Having selected the Cubist model, we then applied the model to our final out-of-sample predictor data set.  This data set was composed of 267 possible scenarios, and excluded the pH values.  We used our model to predict the pH values for each scenario.  For ease of use, we have attached an Excel file with the predicted values for each scenario alongside the predictors used to make the predictions (see the 'PH_Predicted' tab).
+
+```{r,cache=cacheFlag,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# pre-processing OutSample data
+outOfSamplePredictors <- outOfSampleData %>% select(-PH)
+# remove NAs, impute missing values
+imputeMethodPMM<-mice(outOfSamplePredictors,m=50,meth='pmm',seed=randomSeed,
+  printFlag = F)
+outOfSamplePredictors<-complete(imputeMethodPMM)
+# define preprocess methods
+preprocessMethods<-c('center','scale','BoxCox','nzv')
+# set up preprocessor using test plus train
+outOfSamplePredictorsPreprocessor<-preProcess(outOfSamplePredictors,
+  method=preprocessMethods)
+# generate predictions
+outOfSamplePredictorsTransformed <- predict(outOfSamplePredictorsPreprocessor, 
+  outOfSamplePredictors)
+# generate predictions
+outOfSampleResponse <- predict(model_cubist_full, outOfSamplePredictorsTransformed)
+# add forecast to out-of-sample data
+outOfSampleData$PH <- outOfSampleResponse
+# open workbook
+wb = loadWorkbook(paste0(outputDirectory,outputFileName))
+# remove sheet
+removeSheet(wb, sheetName = "PH_Predicted")
+# save workbook
+saveWorkbook(wb, paste0(outputDirectory,outputFileName))
+# add third data set in new worksheet
+write.xlsx(outOfSampleData, file=paste0(outputDirectory,
+  outputFileName), sheetName="PH_Predicted", append=TRUE)
+
+
+```
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# stop cluster
+stopCluster(cluster)
+# de-register parallel processing cluster
+registerDoSEQ()
+
+```
+
+
+```{r,echo=showCodeFlag,error=errorFlag,warning=warningFlag,message=messageFlag}
+# save
+save.image(file = paste0(outputDirectory,"DATA_624_Project_2.RData"))
+
+```
+
+## References
+
+P. Cichosz [2015], Data Mining Algorithms: Explained Using R, John Wiley & Sons, Ltd.
+
+D. Dalpiaz, Applied Statistics with R [2017], University of Illinois at Urbana-Champaign.
+https://daviddalpiaz.github.io/appliedstats/
+
+J. J. Faraway [2014], Linear Models with, R Second Edition, Chapman & Hall/CRC.
+
+N. Fieller [2016], Basics of Matrix Algebra for Statistics with R, Chapman & Hall/CRC.
+
+J. H. Friedman [1993], Fast MARS. Stanford University Department of Statistics, Technical Report 110. 
+
+J. H. Friedman and B W. Silverman [1989], Flexible Parsimonious Smoothing and Additive Modeling. Technometrics, Vol. 31, No. 1.
+
+J. H. Friedman [1991], Multivariate Adaptive Regression Splines (with discussion). Annals of Statistics 19/1.
+
+J. Fox and S. Weisberg [2011], An R Companion to Applied Regression, Second Edition, Thousand Oaks CA: Sage. URL: http://socserv.socsci.mcmaster.ca/jfox/Books/Companion
+
+T. Hastie, R. Tibshirani, J. Friedman [2009], The Elements of Statistical Learning: Data Mining, Inference, and Prediction, Second Edition
+https://web.stanford.edu/~hastie/Papers/ESLII.pdf
+
+M. Kuhn, [2018], A Short Introduction to the caret Package, R package, https://CRAN.R-project.org/package=caret.
+
+M. Kuhn, K. Johnson [2013], Applied Predictive Modeling, First Edition, Springer
+
+M. Kuhn, S. Weston, C. Keefer, and N. Coulter [2016], Cubist: Rule- And Instance-Based Regression Modeling, R package, https://CRAN.R-project.org/package=Cubist.
+
+W. L. Martinez, A. R. Martinez [2015], Computational Statistics Handbook with MATLAB, Third Edition, Chapman and Hall/CRC.
+
+S. Milborrow [2017], earth: Multivariate Adaptive Regression Splines, R package, https://CRAN.R-project.org/package=earth.
+
+S. Milborrow [2015], plotmo: Plot a model's response and residuals, R package, https://CRAN.R-project.org/package=plotmo.
+
+G. Ridgeway [2017], gbm: Generalized Boosted Regression Models, R package, https://CRAN.R-project.org/package=gbm.
+
+S. N. Wood [2017], Generalized Additive Models An Introduction with R, Second Edition, Chapman and Hall/CRC.
+
+Wikipedia. Multivariate Adaptive Regression Splines. http://en.wikipedia.org/ wiki/Multivariate_adaptive_regression_splines, Accessed May 2018.
+
+## Appendix
+
+The .RData files for each model can be found at the following dropbox link:
+
+https://www.dropbox.com/sh/vsd2magdj4xtllc/AADeWmpoHzUdiBHy9bqF5r3ta?dl=0
+
+Although we have provided the .RData files for each of the trained models, the code in this Appendix has flags that can be used to set to re-run the entire study.
+
+```{r,ref.label=knitr::all_labels(),echo=T, eval=F}
+# create appendix of code
+
+```
